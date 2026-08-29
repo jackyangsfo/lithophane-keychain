@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build macOS .app for Lithophane Keychain Generator (Rev 1.0)
+# Build macOS .app for Lithophane Keychain Generator (Rev 2.1)
 # Copyright © 2026 NovaForge Innovations LLC. All rights reserved.
 
 set -euo pipefail
@@ -13,7 +13,7 @@ CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 BUNDLE_ID="com.novaforgeinnovations.lithophane-keychain"
-VERSION="2.0"
+VERSION="2.1"
 COPYRIGHT="Copyright © 2026 NovaForge Innovations LLC. All rights reserved."
 
 if [[ ! -x "$ROOT/venv/bin/python" ]]; then

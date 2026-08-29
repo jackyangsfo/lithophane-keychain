@@ -141,11 +141,12 @@ stl_out/         # Default export folder (gitignored)
 ## GUI Workflow
 
 1. **Open Photo…** — customer image  
-2. Choose **Print Mode** (White / CMYW / Layer Art)  
-3. Choose **Shape** and tune size / hole / thickness  
-4. Confirm **Export path** (or Browse…)  
-5. **Export STL** or **Export 3MF**  
-6. Review preview → drag file into Bambu Studio  
+2. Choose **Product Type** (Keychain / Ornament / Lamp)  
+3. Choose **Print Mode** (White / CMYW / Layer Art)  
+4. Choose **Shape** and tune size / hole / thickness  
+5. Confirm **Export path** (or Browse…)  
+6. **Export STL** or **Export 3MF**  
+7. Review preview → drag file into Bambu Studio  
 
 ---
 
@@ -153,7 +154,7 @@ stl_out/         # Default export folder (gitignored)
 
 ```
 Copyright © 2026 NovaForge Innovations LLC. All rights reserved.
-Lithophane Keychain Generator — Rev 2.0
+Lithophane Keychain Generator — Rev 2.1
 ```
 
 ---

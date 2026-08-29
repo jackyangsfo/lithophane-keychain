@@ -353,7 +353,7 @@ class KeychainApp(tk.Tk):
         val = ttk.Label(head, text=f"{var.get():.2f}", style="Muted.TLabel")
         val.pack(side=tk.RIGHT)
 
-        def on_move(_event=None) -> None:
+        def update_label(_a=None, _b=None, _c=None) -> None:
             v = var.get()
             if resolution >= 1:
                 val.configure(text=f"{v:.0f}")
@@ -361,6 +361,9 @@ class KeychainApp(tk.Tk):
                 val.configure(text=f"{v:.1f}")
             else:
                 val.configure(text=f"{v:.2f}")
+
+        def on_move(_event=None) -> None:
+            update_label()
             self._on_param_change()
 
         scale = ttk.Scale(
@@ -372,7 +375,8 @@ class KeychainApp(tk.Tk):
             command=lambda _v: on_move(),
         )
         scale.pack(fill=tk.X)
-        on_move()
+        var.trace_add("write", update_label)
+        update_label()
 
     def _show_about(self) -> None:
         messagebox.showinfo(f"About — {APP_NAME}", ABOUT_TEXT, parent=self)

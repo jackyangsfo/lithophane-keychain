@@ -12,6 +12,8 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
+from app_info import APP_NAME, REV
+
 
 @dataclass
 class MeshObject:
@@ -96,7 +98,7 @@ def write_3mf(path: Path, meshes: list[MeshObject]) -> Path:
   xml:lang="en-US"
   xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
   xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
-  <metadata name="Application">Lithophane Keychain Generator Rev 2.0</metadata>
+  <metadata name="Application">{APP_NAME} {REV}</metadata>
   <metadata name="Copyright">Copyright (c) 2026 NovaForge Innovations LLC</metadata>
   <resources>
     <m:basematerials id="1">

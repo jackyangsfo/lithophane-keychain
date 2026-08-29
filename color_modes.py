@@ -1,5 +1,5 @@
 """
-Rev 2.0 color print modes: 4-Color Lithophane & Color Layer Art → 3MF.
+Rev 2.1 color print modes: 4-Color Lithophane & Color Layer Art → 3MF.
 Copyright © 2026 NovaForge Innovations LLC.
 """
 
