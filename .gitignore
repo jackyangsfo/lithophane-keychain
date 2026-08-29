@@ -1,0 +1,21 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# App build / local outputs
+stl_out/
+*_keychain.stl
+*_preview.png
+test_*.stl
+sample_*.stl
+sample_*_preview.png
+sample_preview_only.png
+
+# macOS
+.DS_Store
+*.app/
+
+# IDE (optional keep settings — tracked intentionally via .vscode)
