@@ -1,14 +1,24 @@
 # Lithophane Keychain Generator
 
-**Rev 2.0** · © 2026 NovaForge Innovations LLC
+**Rev 2.1** · © 2026 NovaForge Innovations LLC
 
-Customer photo → shaped keychain (hole + rim + lithophane) → **STL / 3MF** for [Bambu Studio](https://bambulab.com/en/download/studio).
+Customer photo → **keychain / ornament / lamp** → shaped lithophane → **STL / 3MF** for [Bambu Studio](https://bambulab.com/en/download/studio).
 
-Built for Etsy-style custom orders: load a photo, pick shape & print mode, export, print.
+Built for Etsy-style custom orders: load a photo, pick product type & print mode, export, print.
 
 ---
 
 ## Features
+
+### Product types
+
+| Product | Size | Hole | Use |
+|---------|------|------|-----|
+| **Keychain** | Ø45 mm | Ø4.5 mm | Etsy keyring orders |
+| **Ornament / Photo** | Ø80 mm | Ø4.0 mm | Wall / tree ornament |
+| **Lithophane Lamp** | 150 mm | none | LED base / lightbox |
+
+Switching product type in the GUI auto-applies size, hole, rim, thickness, and shape presets (you can still tweak sliders).
 
 | Print Mode | Output | Filament |
 |------------|--------|----------|
@@ -18,12 +28,6 @@ Built for Etsy-style custom orders: load a photo, pick shape & print mode, expor
 
 ### Shapes
 Circle · Oval · Rounded Square · Rectangle · Heart · Hexagon
-
-### Defaults
-- Size ≈ **45 mm**
-- Keyring hole **Ø 4.5 mm**
-- Solid rim + hole collar
-- Export preview PNG next to the model
 
 ---
 
@@ -69,17 +73,23 @@ The `.app` must stay next to `venv/` and `gui.py` in the project folder.
 ### CLI
 
 ```bash
-# White lithophane → STL
-python keychain.py photo.jpg --mode white -o out.stl
+# Keychain (default) → STL
+python keychain.py photo.jpg --product keychain --mode white -o out.stl
+
+# Ornament
+python keychain.py photo.jpg --product ornament -o ornament.stl
+
+# Lamp (no hole, larger)
+python keychain.py photo.jpg --product lamp -o lamp.stl
 
 # CMYW 4-color → 3MF
 python keychain.py photo.jpg --mode four_color --shape heart -o out.3mf
 
 # Color layer art → 3MF
-python keychain.py photo.jpg --mode layer_art --size 45
+python keychain.py photo.jpg --mode layer_art --product ornament
 
 # Batch a folder
-python keychain.py ./orders/ --batch --mode white
+python keychain.py ./orders/ --batch --product keychain --mode white
 
 python keychain.py --version
 ```

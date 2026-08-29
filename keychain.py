@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Lithophane Keychain Generator — Rev 2.0
+Lithophane Keychain Generator — Rev 2.1
 Copyright © 2026 NovaForge Innovations LLC. All rights reserved.
 
-Customer photo → keychain + hole + lithophane → STL (Bambu Studio ready)
+Customer photo → keychain / ornament / lamp + lithophane → STL / 3MF
 
 Usage (always use the project venv):
   ./venv/bin/python keychain.py
@@ -72,11 +72,66 @@ PRINT_MODE_EXT = {
     "layer_art": ".3mf",
 }
 
+PRODUCT_TYPES = ("keychain", "ornament", "lamp")
+
+PRODUCT_TYPE_LABELS = {
+    "keychain": "Keychain",
+    "ornament": "Ornament / Photo",
+    "lamp": "Lithophane Lamp",
+}
+
+# Presets applied when switching product type (size, hole, thickness, etc.)
+PRODUCT_PRESETS: dict[str, dict] = {
+    "keychain": {
+        "size_mm": 45.0,
+        "hole_diameter_mm": 4.5,
+        "rim_mm": 3.0,
+        "min_thickness_mm": 0.8,
+        "max_thickness_mm": 2.8,
+        "base_thickness_mm": 0.4,
+        "pixels_per_mm": 4.0,
+        "hole_collar_mm": 1.6,
+        "corner_radius_mm": 6.0,
+        "print_mode": "white",
+        "shape": "circle",
+        "hint": "Ø45 mm · Ø4.5 mm ring hole · Etsy keychain orders",
+    },
+    "ornament": {
+        "size_mm": 80.0,
+        "hole_diameter_mm": 4.0,
+        "rim_mm": 3.5,
+        "min_thickness_mm": 0.8,
+        "max_thickness_mm": 3.0,
+        "base_thickness_mm": 0.5,
+        "pixels_per_mm": 3.5,
+        "hole_collar_mm": 1.8,
+        "corner_radius_mm": 8.0,
+        "print_mode": "white",
+        "shape": "circle",
+        "hint": "Ø80 mm · ribbon hole · wall / tree photo ornament",
+    },
+    "lamp": {
+        "size_mm": 150.0,
+        "hole_diameter_mm": 0.0,  # no keyring hole — sit on LED base / lightbox
+        "rim_mm": 5.0,
+        "min_thickness_mm": 0.6,
+        "max_thickness_mm": 3.2,
+        "base_thickness_mm": 0.6,
+        "pixels_per_mm": 3.0,
+        "hole_collar_mm": 0.0,
+        "corner_radius_mm": 10.0,
+        "print_mode": "white",
+        "shape": "rounded_square",
+        "hint": "150 mm · no hole · translucent white + LED backlight",
+    },
+}
+
 
 @dataclass
 class KeychainSpec:
     size_mm: float = 45.0  # major dimension (diameter / width)
     shape: str = "circle"
+    product_type: str = "keychain"  # keychain | ornament | lamp
     print_mode: str = "white"  # white | four_color | layer_art
     hole_diameter_mm: float = 4.5
     rim_mm: float = 3.0
@@ -97,6 +152,33 @@ class KeychainSpec:
     @property
     def export_ext(self) -> str:
         return PRINT_MODE_EXT.get(self.print_mode, ".stl")
+
+    @property
+    def has_hole(self) -> bool:
+        return self.hole_diameter_mm > 0.05
+
+
+def apply_product_preset(spec: KeychainSpec, product_type: str) -> KeychainSpec:
+    """Return a copy of spec with product-type defaults applied."""
+    if product_type not in PRODUCT_PRESETS:
+        raise ValueError(f"Unknown product type: {product_type}")
+    p = PRODUCT_PRESETS[product_type]
+    return KeychainSpec(
+        size_mm=float(p["size_mm"]),
+        shape=str(p["shape"]),
+        product_type=product_type,
+        print_mode=str(p["print_mode"]),
+        hole_diameter_mm=float(p["hole_diameter_mm"]),
+        rim_mm=float(p["rim_mm"]),
+        min_thickness_mm=float(p["min_thickness_mm"]),
+        max_thickness_mm=float(p["max_thickness_mm"]),
+        base_thickness_mm=float(p["base_thickness_mm"]),
+        pixels_per_mm=float(p["pixels_per_mm"]),
+        hole_collar_mm=float(p["hole_collar_mm"]),
+        corner_radius_mm=float(p["corner_radius_mm"]),
+        contrast=spec.contrast,
+        invert=spec.invert,
+    )
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
@@ -247,6 +329,8 @@ def clamp_to_outline(x: float, y: float, contains: ContainsFn) -> tuple[float, f
 def clamp_out_of_hole(
     x: float, y: float, hx: float, hy: float, hr: float
 ) -> tuple[float, float]:
+    if hr <= 0.05:
+        return x, y
     dh = math.hypot(x - hx, y - hy)
     if dh >= hr:
         return x, y
@@ -271,6 +355,8 @@ def hole_center_for_shape(
 ) -> tuple[float, float]:
     """Place keyring hole near the top, with solid plastic around it."""
     w, h = shape_bounds(spec.shape, spec.size_mm)
+    if not spec.has_hole:
+        return 0.0, h / 2.0
     hr = spec.hole_diameter_mm / 2.0
     clearance = hr + 1.2
     # Walk down from top until the hole disk fits inside the outline
@@ -308,7 +394,7 @@ def shape_mask_preview(
 
     contains = make_contains(spec)
     hx, hy = hole_center_for_shape(spec, contains)
-    hr = spec.hole_diameter_mm / 2.0
+    hr = spec.hole_diameter_mm / 2.0 if spec.has_hole else 0.0
 
     xs = (np.linspace(0.0, 1.0, rw) - 0.5) * w_mm
     ys = (0.5 - np.linspace(0.0, 1.0, rh)) * h_mm
@@ -319,8 +405,13 @@ def shape_mask_preview(
         dtype=bool,
         count=rw * rh,
     ).reshape(rh, rw)
-    hole = np.hypot(xx - hx, yy - hy) < hr
-    inside = body & ~hole
+    if spec.has_hole:
+        hole = np.hypot(xx - hx, yy - hy) < hr
+        inside = body & ~hole
+        collar = inside & (np.hypot(xx - hx, yy - hy) <= hr + spec.hole_collar_mm)
+    else:
+        inside = body
+        collar = np.zeros_like(inside)
 
     step = max(spec.rim_mm, 0.5)
     rim = np.zeros_like(inside)
@@ -344,7 +435,6 @@ def shape_mask_preview(
         ).reshape(rh, rw)
         rim |= sample
 
-    collar = inside & (np.hypot(xx - hx, yy - hy) <= hr + spec.hole_collar_mm)
     solid = rim | collar
 
     rgba = np.zeros((rh, rw, 4), dtype=np.uint8)
@@ -443,7 +533,7 @@ def grid_and_body_masks(
         ny += 1
 
     contains = make_contains(spec)
-    hole_r = spec.hole_diameter_mm / 2.0
+    hole_r = spec.hole_diameter_mm / 2.0 if spec.has_hole else 0.0
     hole_cx, hole_cy = hole_center_for_shape(spec, contains)
 
     xs_1d = np.linspace(-w_mm / 2.0, w_mm / 2.0, nx)
@@ -456,12 +546,17 @@ def grid_and_body_masks(
     for i in range(ny):
         for j in range(nx):
             x, y = float(xs[i, j]), float(ys[i, j])
-            if contains(x, y) and hole_dist[i, j] >= hole_r:
-                body[i, j] = True
-                if is_rim_point(x, y, spec.rim_mm, contains) or hole_dist[
-                    i, j
-                ] <= hole_r + spec.hole_collar_mm:
-                    solid[i, j] = True
+            if not contains(x, y):
+                continue
+            if spec.has_hole and hole_dist[i, j] < hole_r:
+                continue
+            body[i, j] = True
+            in_collar = (
+                spec.has_hole
+                and hole_dist[i, j] <= hole_r + spec.hole_collar_mm
+            )
+            if is_rim_point(x, y, spec.rim_mm, contains) or in_collar:
+                solid[i, j] = True
     return nx, ny, xs, ys, body, solid
 
 
@@ -619,7 +714,7 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
     ny, nx = height.shape
     w_mm, h_mm = shape_bounds(spec.shape, spec.size_mm)
     contains = make_contains(spec)
-    hole_r = spec.hole_diameter_mm / 2.0
+    hole_r = spec.hole_diameter_mm / 2.0 if spec.has_hole else 0.0
     hole_cx, hole_cy = hole_center_for_shape(spec, contains)
 
     xs_1d = np.linspace(-w_mm / 2.0, w_mm / 2.0, nx)
@@ -636,12 +731,17 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
     for i in range(ny):
         for j in range(nx):
             x, y = float(xs[i, j]), float(ys[i, j])
-            if contains(x, y) and hole_dist[i, j] >= hole_r:
-                body[i, j] = True
-                if is_rim_point(x, y, spec.rim_mm, contains) or hole_dist[
-                    i, j
-                ] <= hole_r + spec.hole_collar_mm:
-                    solid[i, j] = True
+            if not contains(x, y):
+                continue
+            if spec.has_hole and hole_dist[i, j] < hole_r:
+                continue
+            body[i, j] = True
+            in_collar = (
+                spec.has_hole
+                and hole_dist[i, j] <= hole_r + spec.hole_collar_mm
+            )
+            if is_rim_point(x, y, spec.rim_mm, contains) or in_collar:
+                solid[i, j] = True
 
     top_z = np.where(
         solid,
@@ -656,9 +756,11 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
         for j in range(nx - 1):
             cx = 0.5 * (xs[i, j] + xs[i + 1, j + 1])
             cy = 0.5 * (ys[i, j] + ys[i + 1, j + 1])
-            cells[i, j] = contains(cx, cy) and math.hypot(
-                cx - hole_cx, cy - hole_cy
-            ) >= hole_r
+            if not contains(cx, cy):
+                continue
+            if spec.has_hole and math.hypot(cx - hole_cx, cy - hole_cy) < hole_r:
+                continue
+            cells[i, j] = True
 
     used = np.zeros((ny, nx), dtype=bool)
     used[:-1, :-1] |= cells
@@ -672,7 +774,8 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
             x, y = float(xs[i, j]), float(ys[i, j])
             if not contains(x, y):
                 x, y = clamp_to_outline(x, y, contains)
-            x, y = clamp_out_of_hole(x, y, hole_cx, hole_cy, hole_r)
+            if spec.has_hole:
+                x, y = clamp_out_of_hole(x, y, hole_cx, hole_cy, hole_r)
             xs[i, j], ys[i, j] = x, y
 
     tris = build_slab_mesh_triangles(xs, ys, top_z, z_bottom=0.0, active=body)
@@ -707,7 +810,7 @@ def _body_and_solid_masks(
     ny: int, nx: int, xs: np.ndarray, ys: np.ndarray, spec: KeychainSpec
 ) -> tuple[np.ndarray, np.ndarray]:
     contains = make_contains(spec)
-    hole_r = spec.hole_diameter_mm / 2.0
+    hole_r = spec.hole_diameter_mm / 2.0 if spec.has_hole else 0.0
     hole_cx, hole_cy = hole_center_for_shape(spec, contains)
     hole_dist = np.hypot(xs - hole_cx, ys - hole_cy)
 
@@ -716,12 +819,17 @@ def _body_and_solid_masks(
     for i in range(ny):
         for j in range(nx):
             x, y = float(xs[i, j]), float(ys[i, j])
-            if contains(x, y) and hole_dist[i, j] >= hole_r:
-                body[i, j] = True
-                if is_rim_point(x, y, spec.rim_mm, contains) or hole_dist[
-                    i, j
-                ] <= hole_r + spec.hole_collar_mm:
-                    solid[i, j] = True
+            if not contains(x, y):
+                continue
+            if spec.has_hole and hole_dist[i, j] < hole_r:
+                continue
+            body[i, j] = True
+            in_collar = (
+                spec.has_hole
+                and hole_dist[i, j] <= hole_r + spec.hole_collar_mm
+            )
+            if is_rim_point(x, y, spec.rim_mm, contains) or in_collar:
+                solid[i, j] = True
     return body, solid
 
 
@@ -824,9 +932,15 @@ def render_result_preview(
         outline=(80, 78, 72),
     )
 
+    hole_txt = (
+        f"hole Ø{spec.hole_diameter_mm:.1f}"
+        if spec.has_hole
+        else "no hole"
+    )
     footer = (
+        f"{PRODUCT_TYPE_LABELS.get(spec.product_type, spec.product_type)}  ·  "
         f"{SHAPE_LABELS.get(spec.shape, spec.shape)}  ·  "
-        f"{w_mm:.0f}×{h_mm:.0f} mm  ·  "
+        f"{w_mm:.0f}×{h_mm:.0f} mm  ·  {hole_txt}  ·  "
         f"thickness {spec.base_thickness_mm + spec.min_thickness_mm:.1f}"
         f"–{spec.base_thickness_mm + spec.max_thickness_mm:.1f} mm"
     )
@@ -854,10 +968,18 @@ def generate_keychain(
 
     w_mm, h_mm = shape_bounds(spec.shape, spec.size_mm)
     say(f"  image  : {image_path}")
+    say(
+        f"  product: {PRODUCT_TYPE_LABELS.get(spec.product_type, spec.product_type)}"
+    )
     say(f"  mode   : {PRINT_MODE_LABELS[mode]} → {ext}")
     say(f"  shape  : {SHAPE_LABELS.get(spec.shape, spec.shape)}")
+    hole_txt = (
+        f"hole Ø{spec.hole_diameter_mm} mm"
+        if spec.has_hole
+        else "no hole"
+    )
     say(
-        f"  size   : {w_mm:.1f}×{h_mm:.1f} mm  hole Ø{spec.hole_diameter_mm} mm  "
+        f"  size   : {w_mm:.1f}×{h_mm:.1f} mm  {hole_txt}  "
         f"thickness {spec.base_thickness_mm + spec.min_thickness_mm:.1f}"
         f"–{spec.base_thickness_mm + spec.max_thickness_mm:.1f} mm"
     )
@@ -935,44 +1057,60 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--shape",
         choices=SHAPES,
-        default="circle",
-        help="Keychain outline shape",
+        default=None,
+        help="Outline shape (default: from product preset)",
     )
     p.add_argument(
         "--mode",
         choices=PRINT_MODES,
-        default="white",
-        help="Print mode: white→STL, four_color/layer_art→3MF",
+        default=None,
+        help="Print mode: white→STL, four_color/layer_art→3MF (default: from product)",
     )
-    p.add_argument("--size", "--diameter", type=float, default=45.0, dest="size",
-                   help="Major size mm (diameter / width)")
-    p.add_argument("--hole", type=float, default=4.5, help="Keyring hole diameter mm")
-    p.add_argument("--rim", type=float, default=3.0, help="Solid rim width mm")
-    p.add_argument("--min-thickness", type=float, default=0.8)
-    p.add_argument("--max-thickness", type=float, default=2.8)
-    p.add_argument("--base", type=float, default=0.4)
-    p.add_argument("--ppm", type=float, default=4.0)
-    p.add_argument("--corner-radius", type=float, default=6.0)
+    p.add_argument(
+        "--product",
+        choices=PRODUCT_TYPES,
+        default="keychain",
+        help="Product type preset (size / hole / thickness)",
+    )
+    p.add_argument("--size", "--diameter", type=float, default=None, dest="size",
+                   help="Major size mm (overrides product preset)")
+    p.add_argument("--hole", type=float, default=None, help="Hole diameter mm (0 = none)")
+    p.add_argument("--rim", type=float, default=None, help="Solid rim width mm")
+    p.add_argument("--min-thickness", type=float, default=None)
+    p.add_argument("--max-thickness", type=float, default=None)
+    p.add_argument("--base", type=float, default=None)
+    p.add_argument("--ppm", type=float, default=None)
+    p.add_argument("--corner-radius", type=float, default=None)
     p.add_argument("--contrast", type=float, default=1.15)
     p.add_argument("--invert", action="store_true")
     return p.parse_args(argv)
 
 
 def spec_from_args(args: argparse.Namespace) -> KeychainSpec:
-    return KeychainSpec(
-        size_mm=args.size,
-        shape=args.shape,
-        print_mode=args.mode,
-        hole_diameter_mm=args.hole,
-        rim_mm=args.rim,
-        min_thickness_mm=args.min_thickness,
-        max_thickness_mm=args.max_thickness,
-        base_thickness_mm=args.base,
-        pixels_per_mm=args.ppm,
-        corner_radius_mm=args.corner_radius,
-        contrast=args.contrast,
-        invert=args.invert,
-    )
+    spec = apply_product_preset(KeychainSpec(), args.product)
+    if args.shape is not None:
+        spec.shape = args.shape
+    if args.mode is not None:
+        spec.print_mode = args.mode
+    if args.size is not None:
+        spec.size_mm = args.size
+    if args.hole is not None:
+        spec.hole_diameter_mm = args.hole
+    if args.rim is not None:
+        spec.rim_mm = args.rim
+    if args.min_thickness is not None:
+        spec.min_thickness_mm = args.min_thickness
+    if args.max_thickness is not None:
+        spec.max_thickness_mm = args.max_thickness
+    if args.base is not None:
+        spec.base_thickness_mm = args.base
+    if args.ppm is not None:
+        spec.pixels_per_mm = args.ppm
+    if args.corner_radius is not None:
+        spec.corner_radius_mm = args.corner_radius
+    spec.contrast = args.contrast
+    spec.invert = args.invert
+    return spec
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -995,7 +1133,10 @@ def main(argv: list[str] | None = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Batch: {len(images)} image(s) → {out_dir}/")
         for img in images:
-            out = out_dir / f"{img.stem}_{spec.shape}_{spec.print_mode}_keychain{spec.export_ext}"
+            out = out_dir / (
+                f"{img.stem}_{spec.product_type}_{spec.shape}_"
+                f"{spec.print_mode}{spec.export_ext}"
+            )
             result = generate_keychain(img, out, spec)
             print()
         return 0
@@ -1005,7 +1146,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     out = args.output or args.input.with_name(
-        f"{args.input.stem}_{spec.shape}_{spec.print_mode}_keychain{spec.export_ext}"
+        f"{args.input.stem}_{spec.product_type}_{spec.shape}_"
+        f"{spec.print_mode}{spec.export_ext}"
     )
     result = generate_keychain(args.input, out, spec)
     if spec.print_mode == "white":

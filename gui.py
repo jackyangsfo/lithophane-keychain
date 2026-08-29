@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tkinter GUI for the Lithophane Keychain Generator — Rev 2.0."""
+"""Tkinter GUI for the Lithophane Keychain Generator — Rev 2.1."""
 
 from __future__ import annotations
 
@@ -30,10 +30,14 @@ from keychain import (
     PRINT_MODE_EXT,
     PRINT_MODE_LABELS,
     PRINT_MODES,
+    PRODUCT_PRESETS,
+    PRODUCT_TYPE_LABELS,
+    PRODUCT_TYPES,
     SHAPE_LABELS,
     SHAPES,
     GenerateResult,
     KeychainSpec,
+    apply_product_preset,
     generate_keychain,
     shape_bounds,
     shape_mask_preview,
@@ -148,6 +152,10 @@ class KeychainApp(tk.Tk):
         self.invert_var = tk.BooleanVar(value=False)
         self.shape_var = tk.StringVar(value="circle")
         self.print_mode_var = tk.StringVar(value="white")
+        self.product_var = tk.StringVar(value="keychain")
+        self.product_hint_var = tk.StringVar(
+            value=PRODUCT_PRESETS["keychain"]["hint"]
+        )
         self.export_path_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Open a customer photo to begin.")
         self.export_label_var = tk.StringVar(value="Export STL path")
@@ -181,12 +189,12 @@ class KeychainApp(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(root, text="Lithophane Keychain", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(root, text="Lithophane Studio", style="Title.TLabel").pack(anchor=tk.W)
         header_row = ttk.Frame(root)
         header_row.pack(fill=tk.X, anchor=tk.W)
         ttk.Label(
             header_row,
-            text="Photo → Print Mode → STL / 3MF for Bambu Studio",
+            text="Photo → Product → Print Mode → STL / 3MF for Bambu Studio",
             style="TLabel",
         ).pack(side=tk.LEFT)
         ttk.Button(header_row, text="About", command=self._show_about).pack(side=tk.RIGHT)
@@ -256,6 +264,25 @@ class KeychainApp(tk.Tk):
         right = ttk.Frame(body, style="Card.TFrame", padding=14)
         right.grid(row=0, column=1, sticky="nsew")
 
+        ttk.Label(right, text="Product Type", style="Card.TLabel").pack(anchor=tk.W)
+        product_frame = ttk.Frame(right, style="Card.TFrame")
+        product_frame.pack(fill=tk.X, pady=(4, 2))
+        for key in PRODUCT_TYPES:
+            ttk.Radiobutton(
+                product_frame,
+                text=PRODUCT_TYPE_LABELS[key],
+                value=key,
+                variable=self.product_var,
+                command=self._on_product_change,
+            ).pack(anchor=tk.W, pady=1)
+        ttk.Label(
+            right,
+            textvariable=self.product_hint_var,
+            style="Muted.TLabel",
+            wraplength=280,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 10))
+
         ttk.Label(right, text="Print Mode", style="Card.TLabel").pack(anchor=tk.W)
         mode_frame = ttk.Frame(right, style="Card.TFrame")
         mode_frame.pack(fill=tk.X, pady=(4, 4))
@@ -292,13 +319,13 @@ class KeychainApp(tk.Tk):
                 command=self._on_shape_change,
             ).grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 12), pady=2)
 
-        self._slider(right, "Size (mm)", self.size_var, 25, 80, 1)
-        self._slider(right, "Hole Ø (mm)", self.hole_var, 3.0, 8.0, 0.1)
-        self._slider(right, "Rim (mm)", self.rim_var, 1.5, 6.0, 0.1)
-        self._slider(right, "Corner radius (mm)", self.corner_var, 1.0, 15.0, 0.5)
+        self._slider(right, "Size (mm)", self.size_var, 25, 180, 1)
+        self._slider(right, "Hole Ø (mm)", self.hole_var, 0.0, 8.0, 0.1)
+        self._slider(right, "Rim (mm)", self.rim_var, 1.5, 8.0, 0.1)
+        self._slider(right, "Corner radius (mm)", self.corner_var, 1.0, 20.0, 0.5)
         self._slider(right, "Min thickness (mm)", self.min_t_var, 0.4, 1.5, 0.05)
         self._slider(right, "Max thickness (mm)", self.max_t_var, 1.5, 4.0, 0.05)
-        self._slider(right, "Base plate (mm)", self.base_var, 0.2, 1.0, 0.05)
+        self._slider(right, "Base plate (mm)", self.base_var, 0.2, 1.2, 0.05)
         self._slider(right, "Detail (px/mm)", self.ppm_var, 2.0, 7.0, 0.5)
         self._slider(right, "Contrast", self.contrast_var, 0.8, 1.8, 0.05)
 
@@ -357,9 +384,10 @@ class KeychainApp(tk.Tk):
         ext = spec.export_ext
         if self.photo_path:
             return out_dir / (
-                f"{self.photo_path.stem}_{spec.shape}_{spec.print_mode}_keychain{ext}"
+                f"{self.photo_path.stem}_{spec.product_type}_{spec.shape}_"
+                f"{spec.print_mode}{ext}"
             )
-        return out_dir / f"keychain_{spec.print_mode}{ext}"
+        return out_dir / f"{spec.product_type}_{spec.print_mode}{ext}"
 
     def _update_export_path(self) -> None:
         self.export_path_var.set(str(self._default_export_path()))
@@ -380,6 +408,25 @@ class KeychainApp(tk.Tk):
             self.cmyw_hint_var.set("Stacked color layers → assign each object in AMS")
         else:
             self.cmyw_hint_var.set("Translucent white PETG / PLA · backlit lithophane")
+
+    def _on_product_change(self) -> None:
+        product = self.product_var.get()
+        spec = apply_product_preset(KeychainSpec(), product)
+        hint = PRODUCT_PRESETS[product].get("hint", "")
+        self.product_hint_var.set(str(hint))
+        self.size_var.set(spec.size_mm)
+        self.hole_var.set(spec.hole_diameter_mm)
+        self.rim_var.set(spec.rim_mm)
+        self.min_t_var.set(spec.min_thickness_mm)
+        self.max_t_var.set(spec.max_thickness_mm)
+        self.base_var.set(spec.base_thickness_mm)
+        self.ppm_var.set(spec.pixels_per_mm)
+        self.corner_var.set(spec.corner_radius_mm)
+        self.shape_var.set(spec.shape)
+        self.print_mode_var.set(spec.print_mode)
+        self._update_cmyw_hint()
+        self._update_export_path()
+        self._on_param_change()
 
     def _on_print_mode_change(self) -> None:
         self._update_cmyw_hint()
@@ -432,9 +479,14 @@ class KeychainApp(tk.Tk):
         return out
 
     def _current_spec(self) -> KeychainSpec:
+        product = self.product_var.get()
+        collar = float(
+            PRODUCT_PRESETS.get(product, {}).get("hole_collar_mm", 1.6)
+        )
         return KeychainSpec(
             size_mm=float(self.size_var.get()),
             shape=self.shape_var.get(),
+            product_type=product,
             print_mode=self.print_mode_var.get(),
             hole_diameter_mm=float(self.hole_var.get()),
             rim_mm=float(self.rim_var.get()),
@@ -442,6 +494,7 @@ class KeychainApp(tk.Tk):
             max_thickness_mm=float(self.max_t_var.get()),
             base_thickness_mm=float(self.base_var.get()),
             pixels_per_mm=float(self.ppm_var.get()),
+            hole_collar_mm=collar,
             corner_radius_mm=float(self.corner_var.get()),
             contrast=float(self.contrast_var.get()),
             invert=bool(self.invert_var.get()),
