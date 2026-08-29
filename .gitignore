@@ -8,6 +8,8 @@ __pycache__/
 # App build / local outputs
 stl_out/
 *_keychain.stl
+*_keychain.3mf
+*.3mf
 *_preview.png
 test_*.stl
 sample_*.stl

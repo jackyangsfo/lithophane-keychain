@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lithophane Keychain Generator — Rev 1.0
+Lithophane Keychain Generator — Rev 2.0
 Copyright © 2026 NovaForge Innovations LLC. All rights reserved.
 
 Customer photo → keychain + hole + lithophane → STL (Bambu Studio ready)
@@ -58,11 +58,26 @@ SHAPE_LABELS = {
     "hexagon": "Hexagon",
 }
 
+PRINT_MODES = ("white", "four_color", "layer_art")
+
+PRINT_MODE_LABELS = {
+    "white": "White Lithophane",
+    "four_color": "4-Color Lithophane (CMYW)",
+    "layer_art": "Color Layer Art",
+}
+
+PRINT_MODE_EXT = {
+    "white": ".stl",
+    "four_color": ".3mf",
+    "layer_art": ".3mf",
+}
+
 
 @dataclass
 class KeychainSpec:
     size_mm: float = 45.0  # major dimension (diameter / width)
     shape: str = "circle"
+    print_mode: str = "white"  # white | four_color | layer_art
     hole_diameter_mm: float = 4.5
     rim_mm: float = 3.0
     min_thickness_mm: float = 0.8
@@ -78,6 +93,10 @@ class KeychainSpec:
     @property
     def diameter_mm(self) -> float:
         return self.size_mm
+
+    @property
+    def export_ext(self) -> str:
+        return PRINT_MODE_EXT.get(self.print_mode, ".stl")
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
@@ -376,23 +395,53 @@ def prepare_image(
     return arr
 
 
+def prepare_color_image(
+    path: Path,
+    width_px: int,
+    height_px: int,
+    contrast: float = 1.15,
+) -> np.ndarray:
+    """Load → RGB uint8 array shaped (H, W, 3)."""
+    img = Image.open(path)
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+
+    target_aspect = width_px / height_px
+    w, h = img.size
+    src_aspect = w / h
+    if src_aspect > target_aspect:
+        new_w = int(round(h * target_aspect))
+        left = (w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, h))
+    else:
+        new_h = int(round(w / target_aspect))
+        top = (h - new_h) // 2
+        img = img.crop((0, top, w, top + new_h))
+
+    img = img.resize((width_px, height_px), Image.Resampling.LANCZOS)
+    if contrast != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(contrast)
+    return np.asarray(img, dtype=np.uint8)
+
+
 def brightness_to_thickness(
     brightness: np.ndarray, min_t: float, max_t: float
 ) -> np.ndarray:
     return min_t + (1.0 - brightness) * (max_t - min_t)
 
 
-# ---------------------------------------------------------------------------
-# Mesh builder
-# ---------------------------------------------------------------------------
-
-def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
-    """
-    Watertight STL from height field.
-    X/Y centered, hole near +Y, Z=0 flat back.
-    """
-    ny, nx = height.shape
+def grid_and_body_masks(
+    spec: KeychainSpec,
+) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return nx, ny, xs, ys, body, solid masks for the keychain outline."""
     w_mm, h_mm = shape_bounds(spec.shape, spec.size_mm)
+    nx = max(48, int(round(w_mm * spec.pixels_per_mm)))
+    ny = max(48, int(round(h_mm * spec.pixels_per_mm)))
+    if nx % 2 == 0:
+        nx += 1
+    if ny % 2 == 0:
+        ny += 1
+
     contains = make_contains(spec)
     hole_r = spec.hole_diameter_mm / 2.0
     hole_cx, hole_cy = hole_center_for_shape(spec, contains)
@@ -400,15 +449,10 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
     xs_1d = np.linspace(-w_mm / 2.0, w_mm / 2.0, nx)
     ys_1d = np.linspace(-h_mm / 2.0, h_mm / 2.0, ny)
     xs, ys = np.meshgrid(xs_1d, ys_1d)
-
-    litho_t = brightness_to_thickness(
-        height, spec.min_thickness_mm, spec.max_thickness_mm
-    )
     hole_dist = np.hypot(xs - hole_cx, ys - hole_cy)
 
-    # Vectorized rim approx via distance sampling is expensive — compute solid mask
-    solid = np.zeros_like(height, dtype=bool)
-    body = np.zeros_like(height, dtype=bool)
+    body = np.zeros((ny, nx), dtype=bool)
+    solid = np.zeros((ny, nx), dtype=bool)
     for i in range(ny):
         for j in range(nx):
             x, y = float(xs[i, j]), float(ys[i, j])
@@ -418,23 +462,89 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
                     i, j
                 ] <= hole_r + spec.hole_collar_mm:
                     solid[i, j] = True
+    return nx, ny, xs, ys, body, solid
 
-    top_z = np.where(
-        solid,
-        spec.base_thickness_mm + spec.max_thickness_mm,
-        spec.base_thickness_mm + litho_t,
-    )
-    top_z = np.where(body, top_z, 0.0)
 
-    def in_body_pt(x: float, y: float) -> bool:
-        return contains(x, y) and math.hypot(x - hole_cx, y - hole_cy) >= hole_r
+# ---------------------------------------------------------------------------
+# Mesh builder
+# ---------------------------------------------------------------------------
+
+def build_slab_mesh_triangles(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    top_z: np.ndarray,
+    z_bottom: float,
+    active: np.ndarray,
+    *,
+    min_corners: int = 2,
+    cell_mask: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """
+    Build watertight triangle array (N,3,3) for a height field slab.
+
+    A grid cell is included when:
+      - cell_mask[i,j] is True (if provided), else
+      - at least `min_corners` of its 4 vertices are in `active`
+    and the mean top height is above z_bottom.
+
+    Corner vertices missing from `active` inherit height from active
+    corners of the same cell so boundaries stay printable.
+    """
+    ny, nx = top_z.shape
+    top = top_z.astype(np.float64, copy=True)
 
     cells = np.zeros((ny - 1, nx - 1), dtype=bool)
+    if cell_mask is not None:
+        if cell_mask.shape != (ny - 1, nx - 1):
+            raise ValueError("cell_mask shape must be (ny-1, nx-1)")
+        cells[:, :] = cell_mask
+    else:
+        for i in range(ny - 1):
+            for j in range(nx - 1):
+                corners = (
+                    int(active[i, j])
+                    + int(active[i, j + 1])
+                    + int(active[i + 1, j])
+                    + int(active[i + 1, j + 1])
+                )
+                if corners >= min_corners:
+                    cells[i, j] = True
+
+    # Drop flat / empty cells; lift inactive corners on kept cells
     for i in range(ny - 1):
         for j in range(nx - 1):
-            cx = 0.5 * (xs[i, j] + xs[i + 1, j + 1])
-            cy = 0.5 * (ys[i, j] + ys[i + 1, j + 1])
-            cells[i, j] = in_body_pt(cx, cy)
+            if not cells[i, j]:
+                continue
+            zs = [
+                top[i, j],
+                top[i, j + 1],
+                top[i + 1, j],
+                top[i + 1, j + 1],
+            ]
+            acts = [
+                bool(active[i, j]),
+                bool(active[i, j + 1]),
+                bool(active[i + 1, j]),
+                bool(active[i + 1, j + 1]),
+            ]
+            active_zs = [z for z, a in zip(zs, acts) if a and z > z_bottom + 1e-9]
+            if not active_zs:
+                # cell_mask path: use any top above bottom
+                active_zs = [z for z in zs if z > z_bottom + 1e-9]
+            if not active_zs:
+                cells[i, j] = False
+                continue
+            fill = float(max(active_zs))
+            if 0.25 * sum(zs) <= z_bottom + 1e-6 and fill <= z_bottom + 1e-6:
+                cells[i, j] = False
+                continue
+            # Ensure all four corners have printable height for this cell
+            for di, dj in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                if top[i + di, j + dj] <= z_bottom + 1e-9:
+                    top[i + di, j + dj] = fill
+
+    if not np.any(cells):
+        return None
 
     used = np.zeros((ny, nx), dtype=bool)
     used[:-1, :-1] |= cells
@@ -442,32 +552,20 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
     used[1:, :-1] |= cells
     used[1:, 1:] |= cells
 
-    vx, vy = xs.copy(), ys.copy()
-    for i in range(ny):
-        for j in range(nx):
-            if not used[i, j]:
-                continue
-            x, y = float(xs[i, j]), float(ys[i, j])
-            if not contains(x, y):
-                x, y = clamp_to_outline(x, y, contains)
-            x, y = clamp_out_of_hole(x, y, hole_cx, hole_cy, hole_r)
-            vx[i, j], vy[i, j] = x, y
-
-    n_verts_layer = ny * nx
-
     def tid(i: int, j: int) -> int:
         return i * nx + j
 
     def bid(i: int, j: int) -> int:
-        return n_verts_layer + i * nx + j
+        return ny * nx + i * nx + j
 
     vertices: list[list[float]] = []
     for i in range(ny):
         for j in range(nx):
-            vertices.append([float(vx[i, j]), float(vy[i, j]), float(top_z[i, j])])
+            z = float(top[i, j]) if used[i, j] else float(z_bottom)
+            vertices.append([float(xs[i, j]), float(ys[i, j]), z])
     for i in range(ny):
         for j in range(nx):
-            vertices.append([float(vx[i, j]), float(vy[i, j]), 0.0])
+            vertices.append([float(xs[i, j]), float(ys[i, j]), float(z_bottom)])
 
     faces: list[list[int]] = []
 
@@ -504,19 +602,86 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
             if not down:
                 add_wall(i, j, i, j + 1, outward_flip=True)
 
-    if not faces:
-        raise RuntimeError("No faces generated — check image / size settings.")
-
-    data = np.zeros(len(faces), dtype=mesh.Mesh.dtype)
-    stl_mesh = mesh.Mesh(data)
     verts = np.asarray(vertices, dtype=np.float64)
-    for k, tri in enumerate(faces):
-        stl_mesh.vectors[k] = verts[tri]
-
-    v0, v1, v2 = stl_mesh.vectors[:, 0], stl_mesh.vectors[:, 1], stl_mesh.vectors[:, 2]
+    tris = np.asarray([verts[f] for f in faces], dtype=np.float64)
+    v0, v1, v2 = tris[:, 0], tris[:, 1], tris[:, 2]
     signed_vol = float(np.sum(np.cross(v0, v1) * v2) / 6.0)
     if signed_vol < 0:
-        stl_mesh.vectors[:, [1, 2]] = stl_mesh.vectors[:, [2, 1]]
+        tris[:, [1, 2]] = tris[:, [2, 1]]
+    return tris
+
+
+def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
+    """
+    Watertight STL from height field.
+    X/Y centered, hole near +Y, Z=0 flat back.
+    """
+    ny, nx = height.shape
+    w_mm, h_mm = shape_bounds(spec.shape, spec.size_mm)
+    contains = make_contains(spec)
+    hole_r = spec.hole_diameter_mm / 2.0
+    hole_cx, hole_cy = hole_center_for_shape(spec, contains)
+
+    xs_1d = np.linspace(-w_mm / 2.0, w_mm / 2.0, nx)
+    ys_1d = np.linspace(-h_mm / 2.0, h_mm / 2.0, ny)
+    xs, ys = np.meshgrid(xs_1d, ys_1d)
+
+    litho_t = brightness_to_thickness(
+        height, spec.min_thickness_mm, spec.max_thickness_mm
+    )
+    hole_dist = np.hypot(xs - hole_cx, ys - hole_cy)
+
+    solid = np.zeros_like(height, dtype=bool)
+    body = np.zeros_like(height, dtype=bool)
+    for i in range(ny):
+        for j in range(nx):
+            x, y = float(xs[i, j]), float(ys[i, j])
+            if contains(x, y) and hole_dist[i, j] >= hole_r:
+                body[i, j] = True
+                if is_rim_point(x, y, spec.rim_mm, contains) or hole_dist[
+                    i, j
+                ] <= hole_r + spec.hole_collar_mm:
+                    solid[i, j] = True
+
+    top_z = np.where(
+        solid,
+        spec.base_thickness_mm + spec.max_thickness_mm,
+        spec.base_thickness_mm + litho_t,
+    )
+    top_z = np.where(body, top_z, 0.0)
+
+    # Clamp boundary vertices for cleaner outline
+    cells = np.zeros((ny - 1, nx - 1), dtype=bool)
+    for i in range(ny - 1):
+        for j in range(nx - 1):
+            cx = 0.5 * (xs[i, j] + xs[i + 1, j + 1])
+            cy = 0.5 * (ys[i, j] + ys[i + 1, j + 1])
+            cells[i, j] = contains(cx, cy) and math.hypot(
+                cx - hole_cx, cy - hole_cy
+            ) >= hole_r
+
+    used = np.zeros((ny, nx), dtype=bool)
+    used[:-1, :-1] |= cells
+    used[:-1, 1:] |= cells
+    used[1:, :-1] |= cells
+    used[1:, 1:] |= cells
+    for i in range(ny):
+        for j in range(nx):
+            if not used[i, j]:
+                continue
+            x, y = float(xs[i, j]), float(ys[i, j])
+            if not contains(x, y):
+                x, y = clamp_to_outline(x, y, contains)
+            x, y = clamp_out_of_hole(x, y, hole_cx, hole_cy, hole_r)
+            xs[i, j], ys[i, j] = x, y
+
+    tris = build_slab_mesh_triangles(xs, ys, top_z, z_bottom=0.0, active=body)
+    if tris is None:
+        raise RuntimeError("No faces generated — check image / size settings.")
+
+    data = np.zeros(len(tris), dtype=mesh.Mesh.dtype)
+    stl_mesh = mesh.Mesh(data)
+    stl_mesh.vectors[:] = tris
     stl_mesh.update_normals()
     return stl_mesh
 
@@ -527,9 +692,15 @@ def build_lithophane_mesh(height: np.ndarray, spec: KeychainSpec) -> mesh.Mesh:
 
 @dataclass
 class GenerateResult:
-    stl_path: Path
+    output_path: Path
     preview_path: Path | None
     preview_image: Image.Image
+    print_mode: str = "white"
+
+    @property
+    def stl_path(self) -> Path:
+        """Backward-compatible alias."""
+        return self.output_path
 
 
 def _body_and_solid_masks(
@@ -675,36 +846,50 @@ def generate_keychain(
     save_preview: bool = True,
 ) -> GenerateResult:
     say = log or print
-    w_mm, h_mm = shape_bounds(spec.shape, spec.size_mm)
-    nx = max(48, int(round(w_mm * spec.pixels_per_mm)))
-    ny = max(48, int(round(h_mm * spec.pixels_per_mm)))
-    if nx % 2 == 0:
-        nx += 1
-    if ny % 2 == 0:
-        ny += 1
+    mode = spec.print_mode if spec.print_mode in PRINT_MODES else "white"
+    ext = PRINT_MODE_EXT[mode]
+    output_path = Path(output_path)
+    if output_path.suffix.lower() != ext:
+        output_path = output_path.with_suffix(ext)
 
+    w_mm, h_mm = shape_bounds(spec.shape, spec.size_mm)
     say(f"  image  : {image_path}")
+    say(f"  mode   : {PRINT_MODE_LABELS[mode]} → {ext}")
     say(f"  shape  : {SHAPE_LABELS.get(spec.shape, spec.shape)}")
-    say(f"  mesh   : {nx}×{ny}  ({spec.pixels_per_mm} px/mm)")
     say(
         f"  size   : {w_mm:.1f}×{h_mm:.1f} mm  hole Ø{spec.hole_diameter_mm} mm  "
         f"thickness {spec.base_thickness_mm + spec.min_thickness_mm:.1f}"
         f"–{spec.base_thickness_mm + spec.max_thickness_mm:.1f} mm"
     )
 
-    height = prepare_image(
-        image_path, nx, ny, contrast=spec.contrast, invert=spec.invert
-    )
-    stl_mesh = build_lithophane_mesh(height, spec)
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    stl_mesh.save(str(output_path))
+    preview_image: Image.Image
 
-    mb = output_path.stat().st_size / (1024 * 1024)
-    say(f"  saved  : {output_path}  ({mb:.2f} MB, {len(stl_mesh.vectors)} tris)")
+    if mode == "white":
+        nx = max(48, int(round(w_mm * spec.pixels_per_mm)))
+        ny = max(48, int(round(h_mm * spec.pixels_per_mm)))
+        if nx % 2 == 0:
+            nx += 1
+        if ny % 2 == 0:
+            ny += 1
+        say(f"  mesh   : {nx}×{ny}  ({spec.pixels_per_mm} px/mm)")
+        height = prepare_image(
+            image_path, nx, ny, contrast=spec.contrast, invert=spec.invert
+        )
+        stl_mesh = build_lithophane_mesh(height, spec)
+        stl_mesh.save(str(output_path))
+        mb = output_path.stat().st_size / (1024 * 1024)
+        say(f"  saved  : {output_path}  ({mb:.2f} MB, {len(stl_mesh.vectors)} tris)")
+        say("  preview: rendering backlit simulation…")
+        preview_image = render_result_preview(image_path, spec)
+    else:
+        from color_modes import export_color_3mf
 
-    say("  preview: rendering backlit simulation…")
-    preview_image = render_result_preview(image_path, spec)
+        say("  mesh   : building multi-color objects…")
+        _, preview_image = export_color_3mf(image_path, output_path, spec, mode)
+        mb = output_path.stat().st_size / (1024 * 1024)
+        say(f"  saved  : {output_path}  ({mb:.2f} MB 3MF)")
+
     preview_path: Path | None = None
     if save_preview:
         preview_path = output_path.with_name(output_path.stem + "_preview.png")
@@ -712,9 +897,10 @@ def generate_keychain(
         say(f"  preview: {preview_path}")
 
     return GenerateResult(
-        stl_path=output_path,
+        output_path=output_path,
         preview_path=preview_path,
         preview_image=preview_image,
+        print_mode=mode,
     )
 
 
@@ -752,6 +938,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="circle",
         help="Keychain outline shape",
     )
+    p.add_argument(
+        "--mode",
+        choices=PRINT_MODES,
+        default="white",
+        help="Print mode: white→STL, four_color/layer_art→3MF",
+    )
     p.add_argument("--size", "--diameter", type=float, default=45.0, dest="size",
                    help="Major size mm (diameter / width)")
     p.add_argument("--hole", type=float, default=4.5, help="Keyring hole diameter mm")
@@ -770,6 +962,7 @@ def spec_from_args(args: argparse.Namespace) -> KeychainSpec:
     return KeychainSpec(
         size_mm=args.size,
         shape=args.shape,
+        print_mode=args.mode,
         hole_diameter_mm=args.hole,
         rim_mm=args.rim,
         min_thickness_mm=args.min_thickness,
@@ -802,7 +995,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Batch: {len(images)} image(s) → {out_dir}/")
         for img in images:
-            out = out_dir / f"{img.stem}_{spec.shape}_keychain.stl"
+            out = out_dir / f"{img.stem}_{spec.shape}_{spec.print_mode}_keychain{spec.export_ext}"
             result = generate_keychain(img, out, spec)
             print()
         return 0
@@ -812,13 +1005,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     out = args.output or args.input.with_name(
-        f"{args.input.stem}_{spec.shape}_keychain.stl"
+        f"{args.input.stem}_{spec.shape}_{spec.print_mode}_keychain{spec.export_ext}"
     )
     result = generate_keychain(args.input, out, spec)
-    print("\nOpen the STL in Bambu Studio. Suggested:")
-    print("  • Filament: translucent white PETG or PLA")
-    print("  • Orient: flat on bed (back down) or stand on edge for sharper layers")
-    print("  • Layer height: 0.08–0.12 mm  |  Wall: 2–3  |  Infill: 100%")
+    if spec.print_mode == "white":
+        print("\nOpen the STL in Bambu Studio. Suggested:")
+        print("  • Filament: translucent white PETG or PLA")
+        print("  • Layer height: 0.08–0.12 mm  |  Wall: 2–3  |  Infill: 100%")
+    else:
+        print("\nOpen the 3MF in Bambu Studio:")
+        print("  • Each object = one AMS filament (match preview swatches)")
+        print("  • Enable multi-color / AMS; layer height 0.08–0.16 mm")
     if result.preview_path:
         print(f"  • Preview image: {result.preview_path}")
     return 0

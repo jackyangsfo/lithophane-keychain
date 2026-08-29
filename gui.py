@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tkinter GUI for the Lithophane Keychain Generator — Rev 1.0."""
+"""Tkinter GUI for the Lithophane Keychain Generator — Rev 2.0."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from keychain import (
+    PRINT_MODE_EXT,
+    PRINT_MODE_LABELS,
+    PRINT_MODES,
     SHAPE_LABELS,
     SHAPES,
     GenerateResult,
@@ -65,9 +68,11 @@ class ResultPreviewWindow(tk.Toplevel):
             style="Title.TLabel",
         ).pack(anchor=tk.W)
 
-        detail = f"STL saved: {result.stl_path.name}"
+        detail = f"Saved: {result.output_path.name}"
         if result.preview_path:
-            detail += f"  ·  Preview PNG: {result.preview_path.name}"
+            detail += f"  ·  Preview: {result.preview_path.name}"
+        mode = PRINT_MODE_LABELS.get(result.print_mode, result.print_mode)
+        ttk.Label(frame, text=f"{mode}", style="Card.TLabel").pack(anchor=tk.W)
         ttk.Label(frame, text=detail, style="Muted.TLabel").pack(anchor=tk.W, pady=(4, 12))
 
         img = result.preview_image.copy()
@@ -101,7 +106,7 @@ class ResultPreviewWindow(tk.Toplevel):
         self.geometry(f"+{pw + (mw - w) // 2}+{ph + (mh - h) // 2}")
 
     def _reveal(self) -> None:
-        folder = self.result.stl_path.parent
+        folder = self.result.output_path.parent
         try:
             os.system(f'open "{folder}"')  # macOS
         except OSError:
@@ -142,8 +147,11 @@ class KeychainApp(tk.Tk):
         self.contrast_var = tk.DoubleVar(value=1.15)
         self.invert_var = tk.BooleanVar(value=False)
         self.shape_var = tk.StringVar(value="circle")
+        self.print_mode_var = tk.StringVar(value="white")
         self.export_path_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Open a customer photo to begin.")
+        self.export_label_var = tk.StringVar(value="Export STL path")
+        self.export_btn_var = tk.StringVar(value="Export STL")
 
         self._build_style()
         self._build_ui()
@@ -178,7 +186,7 @@ class KeychainApp(tk.Tk):
         header_row.pack(fill=tk.X, anchor=tk.W)
         ttk.Label(
             header_row,
-            text="Photo → shape + 4.5 mm hole → STL for Bambu Studio",
+            text="Photo → Print Mode → STL / 3MF for Bambu Studio",
             style="TLabel",
         ).pack(side=tk.LEFT)
         ttk.Button(header_row, text="About", command=self._show_about).pack(side=tk.RIGHT)
@@ -203,9 +211,13 @@ class KeychainApp(tk.Tk):
         btns = ttk.Frame(left, style="Card.TFrame")
         btns.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(btns, text="Open Photo…", command=self._open_photo).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Export STL", style="Accent.TButton", command=self._export_stl).pack(
-            side=tk.LEFT, padx=(8, 0)
+        self.export_btn = ttk.Button(
+            btns,
+            textvariable=self.export_btn_var,
+            style="Accent.TButton",
+            command=self._export_stl,
         )
+        self.export_btn.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Radiobutton(
             btns,
             text="Photo",
@@ -224,7 +236,7 @@ class KeychainApp(tk.Tk):
         export_row = ttk.Frame(left, style="Card.TFrame")
         export_row.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         export_row.columnconfigure(0, weight=1)
-        ttk.Label(export_row, text="Export STL path", style="Card.TLabel").grid(
+        ttk.Label(export_row, textvariable=self.export_label_var, style="Card.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         self.export_entry = ttk.Entry(export_row, textvariable=self.export_path_var)
@@ -243,6 +255,30 @@ class KeychainApp(tk.Tk):
         # Controls card
         right = ttk.Frame(body, style="Card.TFrame", padding=14)
         right.grid(row=0, column=1, sticky="nsew")
+
+        ttk.Label(right, text="Print Mode", style="Card.TLabel").pack(anchor=tk.W)
+        mode_frame = ttk.Frame(right, style="Card.TFrame")
+        mode_frame.pack(fill=tk.X, pady=(4, 4))
+        for key in PRINT_MODES:
+            ext = PRINT_MODE_EXT[key].upper().lstrip(".")
+            ttk.Radiobutton(
+                mode_frame,
+                text=f"{PRINT_MODE_LABELS[key]}  →  {ext}",
+                value=key,
+                variable=self.print_mode_var,
+                command=self._on_print_mode_change,
+            ).pack(anchor=tk.W, pady=1)
+
+        self.cmyw_hint_var = tk.StringVar(value="")
+        self.cmyw_hint = ttk.Label(
+            right,
+            textvariable=self.cmyw_hint_var,
+            style="Muted.TLabel",
+            wraplength=280,
+            justify=tk.LEFT,
+        )
+        self.cmyw_hint.pack(anchor=tk.W, pady=(0, 10))
+        self._update_cmyw_hint()
 
         ttk.Label(right, text="Shape", style="Card.TLabel").pack(anchor=tk.W)
         shape_frame = ttk.Frame(right, style="Card.TFrame")
@@ -317,27 +353,60 @@ class KeychainApp(tk.Tk):
     # --------------------------------------------------------------- helpers
     def _default_export_path(self) -> Path:
         out_dir = Path(__file__).resolve().parent / "stl_out"
+        spec = self._current_spec()
+        ext = spec.export_ext
         if self.photo_path:
-            spec = self._current_spec()
-            return out_dir / f"{self.photo_path.stem}_{spec.shape}_keychain.stl"
-        return out_dir / "keychain.stl"
+            return out_dir / (
+                f"{self.photo_path.stem}_{spec.shape}_{spec.print_mode}_keychain{ext}"
+            )
+        return out_dir / f"keychain_{spec.print_mode}{ext}"
 
     def _update_export_path(self) -> None:
         self.export_path_var.set(str(self._default_export_path()))
+        self._sync_export_labels()
+
+    def _sync_export_labels(self) -> None:
+        mode = self.print_mode_var.get()
+        ext = PRINT_MODE_EXT.get(mode, ".stl").upper().lstrip(".")
+        self.export_label_var.set(f"Export {ext} path")
+        self.export_btn_var.set(f"Export {ext}")
+
+    def _update_cmyw_hint(self) -> None:
+        if self.print_mode_var.get() == "four_color":
+            self.cmyw_hint_var.set(
+                "Filaments: Cyan（青） · Magenta（洋红） · Yellow（黄） · White（白）"
+            )
+        elif self.print_mode_var.get() == "layer_art":
+            self.cmyw_hint_var.set("Stacked color layers → assign each object in AMS")
+        else:
+            self.cmyw_hint_var.set("Translucent white PETG / PLA · backlit lithophane")
+
+    def _on_print_mode_change(self) -> None:
+        self._update_cmyw_hint()
+        self._update_export_path()
+        self._on_param_change()
 
     def _on_shape_change(self) -> None:
         self._update_export_path()
         self._on_param_change()
 
     def _browse_export_path(self) -> None:
+        spec = self._current_spec()
+        ext = spec.export_ext
         initial = Path(self.export_path_var.get().strip() or self._default_export_path())
         initial_dir = initial.parent if initial.parent.exists() else Path.cwd()
+        if ext == ".3mf":
+            filetypes = [("3MF", "*.3mf"), ("All files", "*.*")]
+            title = "Choose export 3MF path"
+        else:
+            filetypes = [("STL", "*.stl"), ("All files", "*.*")]
+            title = "Choose export STL path"
         path = filedialog.asksaveasfilename(
-            title="Choose export STL path",
-            defaultextension=".stl",
+            title=title,
+            defaultextension=ext,
             initialdir=str(initial_dir),
             initialfile=initial.name,
-            filetypes=[("STL", "*.stl")],
+            filetypes=filetypes,
         )
         if path:
             self.export_path_var.set(path)
@@ -345,17 +414,20 @@ class KeychainApp(tk.Tk):
     def _resolve_export_path(self) -> Path | None:
         raw = self.export_path_var.get().strip()
         if not raw:
-            messagebox.showwarning("Export path", "Please set an export STL path.")
+            messagebox.showwarning("Export path", "Please set an export file path.")
             return None
         out = Path(raw).expanduser()
-        if out.suffix.lower() != ".stl":
-            out = out.with_suffix(".stl")
+        ext = self._current_spec().export_ext
+        if out.suffix.lower() != ext:
+            out = out.with_suffix(ext)
             self.export_path_var.set(str(out))
         if not out.parent.exists():
             try:
                 out.parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                messagebox.showerror("Export path", f"Cannot create folder:\n{out.parent}\n\n{exc}")
+                messagebox.showerror(
+                    "Export path", f"Cannot create folder:\n{out.parent}\n\n{exc}"
+                )
                 return None
         return out
 
@@ -363,6 +435,7 @@ class KeychainApp(tk.Tk):
         return KeychainSpec(
             size_mm=float(self.size_var.get()),
             shape=self.shape_var.get(),
+            print_mode=self.print_mode_var.get(),
             hole_diameter_mm=float(self.hole_var.get()),
             rim_mm=float(self.rim_var.get()),
             min_thickness_mm=float(self.min_t_var.get()),
@@ -444,11 +517,11 @@ class KeychainApp(tk.Tk):
         self._busy = False
         if ok and result:
             self._last_result = result
-            self.export_path_var.set(str(result.stl_path))
+            self.export_path_var.set(str(result.output_path))
             self._view_mode.set("result")
             self._show_result_in_panel(result)
-            self.status_var.set(f"Saved: {result.stl_path.name}")
-            ResultPreviewWindow(self, result, self.photo_path or result.stl_path)
+            self.status_var.set(f"Saved: {result.output_path.name}")
+            ResultPreviewWindow(self, result, self.photo_path or result.output_path)
         else:
             self.status_var.set("Generation failed.")
             messagebox.showerror("Error", detail)

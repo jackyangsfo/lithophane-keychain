@@ -13,7 +13,7 @@ CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 BUNDLE_ID="com.novaforgeinnovations.lithophane-keychain"
-VERSION="1.0"
+VERSION="2.0"
 COPYRIGHT="Copyright © 2026 NovaForge Innovations LLC. All rights reserved."
 
 if [[ ! -x "$ROOT/venv/bin/python" ]]; then
